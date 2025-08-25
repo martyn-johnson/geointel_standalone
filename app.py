@@ -31,15 +31,31 @@ IGNORED = set()
 
 # -------- Helpers (summary parsing) --------
 def _extract_ssids_from_map(m):
+    # delegate to client's robust logic by keeping this in sync
+    # (copied to avoid import cycle)
     out = []
 
     def _pull(entry):
+        if isinstance(entry, str):
+            return entry
         if not isinstance(entry, dict):
             return None
-        return (
-            entry.get("dot11.probedssid.ssid")
-            or entry.get("dot11", {}).get("probedssid", {}).get("ssid")
-        )
+        if entry.get("dot11.probedssid.nullssid") is True:
+            return ""
+        if isinstance(entry.get("ssidlen"), int) and entry.get("ssidlen") == 0:
+            return ""
+        for k in ("dot11.probedssid.ssid", "ssid", "dot11.ssid", "probedssid.ssid"):
+            v = entry.get(k)
+            if isinstance(v, str):
+                return v
+        nested = entry.get("dot11") or entry.get("probedssid") or {}
+        if isinstance(nested, dict):
+            v = nested.get("probedssid") or nested.get("ssid")
+            if isinstance(v, dict) and isinstance(v.get("ssid"), str):
+                return v.get("ssid")
+            if isinstance(v, str):
+                return v
+        return None
 
     if isinstance(m, list):
         for e in m:
@@ -72,7 +88,8 @@ def extract_probe_count(dev: dict) -> int:
         return c2
     m = dev.get("dot11.device.probed_ssid_map") or dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
     if isinstance(m, list):
-        return sum(1 for e in m if isinstance(e, dict))
+        # count entries, including wildcard '' as activity
+        return sum(1 for e in m if isinstance(e, (dict, str)))
     if isinstance(m, dict):
         return len(m)
     return 0
@@ -192,21 +209,34 @@ def clear_base():
     return jsonify({"ok": True, "base": None})
 
 
+# -------- Debug endpoints --------
 @app.get("/api/debug/probes")
 def debug_probes():
     mac = request.args.get("mac", "").strip()
     if not mac:
         return jsonify({"error": "Provide ?mac=<MAC>"}), 400
     try:
-        by_mac = kis.device_probes(mac)
-        from_recent = kis.probes_from_recent(mac)
-        return jsonify({"mac": mac, "from_by_mac": by_mac, "from_recent": from_recent})
+        by_recent = kis.probes_from_recent(mac)
+        return jsonify({"mac": mac, "from_recent": by_recent})
     except requests.Timeout:
         return jsonify({"mac": mac, "error": "kismet timeout"}), 200
     except requests.RequestException as e:
         return jsonify({"mac": mac, "error": f"kismet request failed: {e.__class__.__name__}"}), 200
     except Exception as e:
         return jsonify({"mac": mac, "error": f"unexpected: {e.__class__.__name__}: {e}"}), 200
+
+
+@app.get("/api/debug/sample")
+def debug_sample():
+    """
+    Returns the first device from the view including the probed_ssid_map,
+    so we can verify the exact shape your Kismet build returns.
+    """
+    try:
+        devs = kis.recent_devices(limit=1)
+        return jsonify({"count": len(devs), "sample": devs[0] if devs else None})
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 200
 
 
 if __name__ == "__main__":
