@@ -1,11 +1,13 @@
 from flask import Flask, jsonify, request, render_template
-from utils import load_config
+from utils import load_config, get_config_path, save_config
 from cache import TTLCache
 from kismet_client import KismetClient
 from wigle_client import WiGLEClient
 from scoring import score_candidates
 
+
 cfg = load_config()
+CFG_PATH = get_config_path()
 app = Flask(__name__, static_folder='static', template_folder='templates')
 
 cache = TTLCache("wigle_cache.json")
@@ -43,13 +45,14 @@ def candidates():
     base = request.args.get("base")
     likely_only = request.args.get("likely_only", "0") == "1"
 
+    base_cfg = cfg.get("base")
     base_latlon = None
-    if base:
+    if isinstance(base_cfg, dict) and "lat" in base_cfg and "lon" in base_cfg:
         try:
-            lat, lon = base.split(",")
-            base_latlon = (float(lat), float(lon))
+            base_latlon = (float(base_cfg["lat"]), float(base_cfg["lon"]))
         except Exception:
             base_latlon = None
+
 
     dev_ssids = kis.device_probes(mac) if mac else []
     if ssid_only:
@@ -81,5 +84,34 @@ def candidates():
         scored = scored[:500]
     return jsonify({"candidates": scored})
 
+
+@app.get('/api/base')
+def get_base():
+    base = cfg.get("base")
+    if isinstance(base, dict) and "lat" in base and "lon" in base:
+        return jsonify({"base": {"lat": float(base["lat"]), "lon": float(base["lon"])}})
+    return jsonify({"base": None})
+
+@app.post('/api/base')
+def set_base():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        lat = float(data.get("lat"))
+        lon = float(data.get("lon"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "lat/lon must be numeric"}), 400
+    cfg["base"] = {"lat": lat, "lon": lon}
+    save_config(cfg, CFG_PATH)
+    return jsonify({"ok": True, "base": cfg["base"]})
+
+@app.delete('/api/base')
+def clear_base():
+    if "base" in cfg:
+        cfg.pop("base", None)
+        save_config(cfg, CFG_PATH)
+    return jsonify({"ok": True, "base": None})
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5699, debug=True)
+

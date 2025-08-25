@@ -33,7 +33,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-let map, markers, baseLatLon = null, settingBase = false;
+let map, markers, baseLatLon = null, settingBase = false, baseMarker = null;
 
 function initMap() {
   map = L.map('map').setView([51.5, -0.12], 6);
@@ -42,13 +42,57 @@ function initMap() {
     attribution: '&copy; OpenStreetMap'
   }).addTo(map);
   markers = L.layerGroup().addTo(map);
-  map.on('click', e => {
+
+  map.on('click', async e => {
     if (settingBase) {
-      baseLatLon = [e.latlng.lat, e.latlng.lng];
-      settingBase = false;
-      alert('Base set to ' + baseLatLon.join(','));
+      const lat = e.latlng.lat, lon = e.latlng.lng;
+      try {
+        const r = await fetch('/api/base', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({lat, lon})
+        });
+        const js = await r.json();
+        if (js && js.base) {
+          baseLatLon = [js.base.lat, js.base.lon];
+          drawBaseMarker();
+          alert('Base set to ' + baseLatLon.join(','));
+        } else {
+          alert('Failed to set base');
+        }
+      } catch (err) {
+        alert('Error setting base: ' + err);
+      } finally {
+        settingBase = false;
+      }
     }
   });
+}
+
+function drawBaseMarker() {
+  if (!map) return;
+  if (baseMarker) {
+    map.removeLayer(baseMarker);
+    baseMarker = null;
+  }
+  if (baseLatLon) {
+    baseMarker = L.marker(baseLatLon, { title: 'Base' }).addTo(map);
+  }
+}
+
+async function loadBase() {
+  try {
+    const r = await fetch('/api/base', { cache: 'no-store' });
+    const js = await r.json();
+    if (js && js.base) {
+      baseLatLon = [js.base.lat, js.base.lon];
+    } else {
+      baseLatLon = null;
+    }
+    drawBaseMarker();
+  } catch (e) {
+    // base is optional; ignore errors
+  }
 }
 
 async function fetchSummary() {
@@ -75,9 +119,9 @@ function renderList(items) {
 async function loadCandidates(mac) {
   markers.clearLayers();
   const params = new URLSearchParams({mac});
-  if (baseLatLon) params.set('base', baseLatLon.join(','));
   const likelyOnly = document.getElementById('likely-only').checked ? '1' : '0';
   params.set('likely_only', likelyOnly);
+
   const r = await fetch('/api/candidates?' + params.toString());
   const js = await r.json();
   const items = js.candidates || [];
@@ -89,6 +133,8 @@ async function loadCandidates(mac) {
     markers.addLayer(m);
     bounds.push(ll);
   }
+  // also include base marker in fit if present
+  if (baseLatLon) bounds.push(baseLatLon);
   if (bounds.length) map.fitBounds(bounds, {maxZoom: 13});
 }
 
@@ -98,10 +144,17 @@ async function refresh() {
 }
 
 document.getElementById('set-base').onclick = () => { settingBase = true; };
-document.getElementById('clear-base').onclick = () => { baseLatLon = null; };
+document.getElementById('clear-base').onclick = async () => {
+  try {
+    await fetch('/api/base', { method: 'DELETE' });
+    baseLatLon = null;
+    drawBaseMarker();
+  } catch (e) {}
+};
 document.getElementById('refresh').onclick = refresh;
 
 initMap();
+loadBase();
 refresh();
 </script>
 </body>
