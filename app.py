@@ -5,7 +5,7 @@ from kismet_client import KismetClient
 from wigle_client import WiGLEClient
 from scoring import score_candidates
 
-
+# -------- App setup --------
 cfg = load_config()
 CFG_PATH = get_config_path()
 app = Flask(__name__, static_folder='static', template_folder='templates')
@@ -21,39 +21,104 @@ wigle = WiGLEClient(
 
 IGNORED = set()
 
+
+# -------- Helpers (summary parsing) --------
+def _extract_ssids_from_map(m):
+    """
+    Normalizes Kismet dot11.device.probed_ssid_map into a list of SSID strings.
+
+    Handles:
+      - Newer Kismet: list[ dict{"dot11.probedssid.ssid": "..."} ]
+      - Older Kismet: dict[hash] -> dict{"dot11.probedssid.ssid": "..."}
+      - Rare nested shapes under ["dot11"]["device"]["probed_ssid_map"]
+    """
+    out = []
+
+    def _pull(entry):
+        if not isinstance(entry, dict):
+            return None
+        return (
+            entry.get("dot11.probedssid.ssid")
+            or entry.get("dot11", {}).get("probedssid", {}).get("ssid")
+        )
+
+    if isinstance(m, list):
+        for e in m:
+            s = _pull(e)
+            if s is not None:
+                out.append(s)
+    elif isinstance(m, dict):
+        for e in m.values():
+            s = _pull(e)
+            if s is not None:
+                out.append(s)
+
+    return out
+
+
+def extract_probed_ssids(dev: dict) -> list:
+    # Try flat key first
+    m = dev.get("dot11.device.probed_ssid_map")
+    out = _extract_ssids_from_map(m)
+    if out:
+        return out
+
+    # Fallback legacy nesting
+    m2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+    return _extract_ssids_from_map(m2)
+
+
+def extract_probe_count(dev: dict) -> int:
+    # Prefer explicit counter if present
+    c = dev.get("dot11.device.probed_ssid_count")
+    if isinstance(c, int):
+        return c
+    c2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_count")
+    if isinstance(c2, int):
+        return c2
+
+    # Infer from the map/vector (counts entries; wildcard '' still counts as activity)
+    m = dev.get("dot11.device.probed_ssid_map") or dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+    if isinstance(m, list):
+        return sum(1 for e in m if isinstance(e, dict))
+    if isinstance(m, dict):
+        return len(m)
+    return 0
+
+
+# -------- Routes --------
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.get('/api/summary')
 def summary():
-    def extract_probed_ssids(dev):
-        # Accept both shapes
-        m = dev.get("dot11.device.probed_ssid_map")
-        if isinstance(m, dict):
-            return list(m.keys())
-        m2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
-        if isinstance(m2, dict):
-            return list(m2.keys())
-        return []
-
-    def extract_probe_count(dev):
-        c = dev.get("dot11.device.probed_ssid_count")
-        if isinstance(c, int):
-            return c
-        c2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_count")
-        if isinstance(c2, int):
-            return c2
-        return 0
-
     devs = kis.recent_devices(limit=200)
     items = []
+
     for d in devs:
         mac = d.get("kismet.device.base.macaddr")
         ts = d.get("kismet.device.base.last_time")
-        ssids = [s for s in extract_probed_ssids(d) if s and s not in IGNORED]
+
+        # full list (including empty '' for wildcard)
+        ssids_full = extract_probed_ssids(d)
+        # displayed list (filter ignored + empty)
+        ssids_display = [s for s in ssids_full if s and s not in IGNORED]
+
         ssid_count = extract_probe_count(d)
-        items.append({"mac": mac, "ts": ts, "ssids": ssids, "ssid_count": ssid_count})
+
+        # Only include devices that actually had probe activity
+        if ssid_count <= 0 and not ssids_full:
+            continue
+
+        items.append({
+            "mac": mac,
+            "ts": ts,
+            "ssids": ssids_display,
+            "ssid_count": ssid_count
+        })
+
     items.sort(key=lambda x: x["ts"] or 0, reverse=True)
     return jsonify({"items": items})
 
@@ -62,7 +127,6 @@ def summary():
 def candidates():
     mac = request.args.get("mac")
     ssid_only = request.args.get("ssid")
-    base = request.args.get("base")
     likely_only = request.args.get("likely_only", "0") == "1"
 
     base_cfg = cfg.get("base")
@@ -72,7 +136,6 @@ def candidates():
             base_latlon = (float(base_cfg["lat"]), float(base_cfg["lon"]))
         except Exception:
             base_latlon = None
-
 
     dev_ssids = kis.device_probes(mac) if mac else []
     if ssid_only:
@@ -112,6 +175,7 @@ def get_base():
         return jsonify({"base": {"lat": float(base["lat"]), "lon": float(base["lon"])}})
     return jsonify({"base": None})
 
+
 @app.post('/api/base')
 def set_base():
     data = request.get_json(force=True, silent=True) or {}
@@ -124,6 +188,7 @@ def set_base():
     save_config(cfg, CFG_PATH)
     return jsonify({"ok": True, "base": cfg["base"]})
 
+
 @app.delete('/api/base')
 def clear_base():
     if "base" in cfg:
@@ -132,6 +197,18 @@ def clear_base():
     return jsonify({"ok": True, "base": None})
 
 
+# -------- Debug endpoint (requested) --------
+@app.get('/api/debug/probes')
+def debug_probes():
+    mac = request.args.get("mac", "").strip()
+    if not mac:
+        return jsonify({"error": "Provide ?mac=<MAC>"}), 400
+    return jsonify({
+        "mac": mac,
+        "from_view": kis.probes_from_view(mac),
+        "from_by_mac": kis.device_probes(mac)
+    })
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5699, debug=True)
-
