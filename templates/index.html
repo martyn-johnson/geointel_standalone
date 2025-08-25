@@ -13,8 +13,9 @@
     .item { padding:8px 12px; border-bottom:1px solid #eee; cursor:pointer; }
     .item:hover { background:#f7f7f7; }
     .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; margin-left: 6px; }
-    .controls { margin-left:auto; display:flex; gap:.5rem; align-items:center; }
+    .controls { margin-left:auto; display:flex; gap:.5rem; align-items:center; flex-wrap: wrap; }
     .status { font-size:12px; opacity:.7; }
+    .mode { font-size:12px; opacity:.8; padding:2px 6px; border:1px dashed #aaa; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -23,9 +24,12 @@
   <div class="controls">
     <button id="set-base">Set Base</button>
     <button id="clear-base">Clear Base</button>
+    <button id="set-bbox">Set BBox</button>
+    <button id="clear-bbox">Clear BBox</button>
     <label><input id="likely-only" type="checkbox" checked> Likely only</label>
     <button id="refresh">Refresh</button>
     <span id="live-status" class="status">live: connecting…</span>
+    <span id="mode" class="mode" style="display:none;"></span>
   </div>
 </header>
 <main>
@@ -38,6 +42,18 @@
 let map, markers, baseLatLon = null, settingBase = false, baseMarker = null;
 let es = null;
 
+// BBox state
+let settingBBox = false;
+let bboxFirst = null;   // first corner LatLng
+let bboxRect = null;    // Leaflet rectangle
+
+function setModeText(txt) {
+  const el = document.getElementById('mode');
+  if (!el) return;
+  if (txt) { el.textContent = txt; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
+}
+
 function initMap() {
   map = L.map('map').setView([51.5, -0.12], 6);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -47,6 +63,7 @@ function initMap() {
   markers = L.layerGroup().addTo(map);
 
   map.on('click', async e => {
+    // Base placement mode takes precedence
     if (settingBase) {
       const lat = e.latlng.lat, lon = e.latlng.lng;
       try {
@@ -67,6 +84,45 @@ function initMap() {
         alert('Error setting base: ' + err);
       } finally {
         settingBase = false;
+        setModeText(null);
+      }
+      return;
+    }
+
+    // BBox placement mode: two clicks = opposite corners
+    if (settingBBox) {
+      if (!bboxFirst) {
+        bboxFirst = e.latlng;
+        setModeText('BBox: click second corner…');
+      } else {
+        const a = bboxFirst, b = e.latlng;
+        bboxFirst = null;
+        settingBBox = false;
+        setModeText(null);
+
+        const lat1 = Math.min(a.lat, b.lat);
+        const lat2 = Math.max(a.lat, b.lat);
+        const lon1 = Math.min(a.lng, b.lng);
+        const lon2 = Math.max(a.lng, b.lng);
+
+        try {
+          const r = await fetch('/api/bbox', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({lat1, lat2, lon1, lon2})
+          });
+          const js = await r.json();
+          if (js && js.bbox) {
+            drawBBoxRect(js.bbox);
+            alert('BBox set.');
+          } else if (js && js.error) {
+            alert('Failed to set BBox: ' + js.error);
+          } else {
+            alert('Failed to set BBox.');
+          }
+        } catch (err) {
+          alert('Error setting BBox: ' + err);
+        }
       }
     }
   });
@@ -83,6 +139,22 @@ function drawBaseMarker() {
   }
 }
 
+function drawBBoxRect(bbox) {
+  if (!map) return;
+  if (bboxRect) {
+    map.removeLayer(bboxRect);
+    bboxRect = null;
+  }
+  if (bbox && typeof bbox.lat1 === 'number' && typeof bbox.lat2 === 'number'
+           && typeof bbox.lon1 === 'number' && typeof bbox.lon2 === 'number') {
+    const southWest = L.latLng(bbox.lat1, bbox.lon1);
+    const northEast = L.latLng(bbox.lat2, bbox.lon2);
+    const bounds = L.latLngBounds(southWest, northEast);
+    bboxRect = L.rectangle(bounds, { weight: 2, fillOpacity: 0.05 });
+    bboxRect.addTo(map);
+  }
+}
+
 async function loadBase() {
   try {
     const r = await fetch('/api/base', { cache: 'no-store' });
@@ -95,6 +167,20 @@ async function loadBase() {
     drawBaseMarker();
   } catch (e) {
     // base is optional; ignore errors
+  }
+}
+
+async function loadBBox() {
+  try {
+    const r = await fetch('/api/bbox', { cache: 'no-store' });
+    const js = await r.json();
+    if (js && js.bbox) {
+      drawBBoxRect(js.bbox);
+    } else {
+      drawBBoxRect(null);
+    }
+  } catch (e) {
+    // bbox is optional; ignore errors
   }
 }
 
@@ -127,7 +213,6 @@ function renderList(items) {
   }
 }
 
-
 async function loadCandidates(mac) {
   markers.clearLayers();
   const params = new URLSearchParams({mac});
@@ -147,6 +232,10 @@ async function loadCandidates(mac) {
   }
   // also include base marker in fit if present
   if (baseLatLon) bounds.push(baseLatLon);
+  if (bboxRect) {
+    const b = bboxRect.getBounds();
+    bounds.push(b.getSouthWest()); bounds.push(b.getNorthEast());
+  }
   if (bounds.length) map.fitBounds(bounds, {maxZoom: 13});
 }
 
@@ -178,7 +267,13 @@ function startLiveSummary() {
   }
 }
 
-document.getElementById('set-base').onclick = () => { settingBase = true; };
+// Controls
+document.getElementById('set-base').onclick = () => {
+  settingBase = true;
+  settingBBox = false; bboxFirst = null;
+  setModeText('Base: click map to set…');
+};
+
 document.getElementById('clear-base').onclick = async () => {
   try {
     await fetch('/api/base', { method: 'DELETE' });
@@ -186,10 +281,29 @@ document.getElementById('clear-base').onclick = async () => {
     drawBaseMarker();
   } catch (e) {}
 };
+
+document.getElementById('set-bbox').onclick = () => {
+  settingBBox = true;
+  settingBase = false;
+  bboxFirst = null;
+  setModeText('BBox: click first corner…');
+};
+
+document.getElementById('clear-bbox').onclick = async () => {
+  try {
+    await fetch('/api/bbox', { method: 'DELETE' });
+    drawBBoxRect(null);
+  } catch (e) {}
+  setModeText(null);
+};
+
+// Manual refresh still useful
 document.getElementById('refresh').onclick = refresh;
 
+// Boot
 initMap();
 loadBase();
+loadBBox();
 // SSE live summary (initial snapshot comes from the stream)
 startLiveSummary();
 </script>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
 
 from flask import Flask, jsonify, request, render_template, Response
@@ -469,7 +469,12 @@ def candidates():
     dev_ssids = [s for s in dev_ssids if s and s not in IGNORED]
 
     rarity_counts, raw_candidates = {}, []
-    region = "uk" if cfg["wigle"].get("bbox") else "global"
+    bbox = cfg.get("wigle", {}).get("bbox")
+    if bbox and all(k in bbox for k in ("lat1", "lat2", "lon1", "lon2")):
+        region = f"bbox:{bbox['lat1']:.4f},{bbox['lat2']:.4f},{bbox['lon1']:.4f},{bbox['lon2']:.4f}"
+    else:
+        region = "global"
+
     ttl_s = int(cfg["wigle"].get("ttl_hours", 24) * 3600)
     for s in dev_ssids:
         key = f"{region}:{s}"
@@ -491,6 +496,7 @@ def candidates():
     return jsonify({"candidates": scored})
 
 
+# ----- Base location ------------------------------------------------------------
 @app.get("/api/base")
 def get_base():
     base = cfg.get("base")
@@ -520,7 +526,59 @@ def clear_base():
     return jsonify({"ok": True, "base": None})
 
 
-# ---- Debug helpers ------------------------------------------------------------
+# ----- WiGLE bounding box -------------------------------------------------------
+@app.get("/api/bbox")
+def get_bbox():
+    bbox = cfg.get("wigle", {}).get("bbox")
+    if isinstance(bbox, dict) and all(k in bbox for k in ("lat1", "lat2", "lon1", "lon2")):
+        return jsonify({"bbox": {
+            "lat1": float(bbox["lat1"]), "lat2": float(bbox["lat2"]),
+            "lon1": float(bbox["lon1"]), "lon2": float(bbox["lon2"]),
+        }})
+    return jsonify({"bbox": None})
+
+
+@app.post("/api/bbox")
+def set_bbox():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        lat1 = float(data.get("lat1"))
+        lat2 = float(data.get("lat2"))
+        lon1 = float(data.get("lon1"))
+        lon2 = float(data.get("lon2"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "lat1/lat2/lon1/lon2 must be numeric"}), 400
+
+    # Normalize ordering
+    lat_lo, lat_hi = sorted([lat1, lat2])
+    lon_lo, lon_hi = sorted([lon1, lon2])
+
+    # Clamp to valid ranges
+    if not (-90.0 <= lat_lo <= 90.0 and -90.0 <= lat_hi <= 90.0 and -180.0 <= lon_lo <= 180.0 and -180.0 <= lon_hi <= 180.0):
+        return jsonify({"error": "lat must be [-90,90], lon must be [-180,180]"}), 400
+
+    cfg.setdefault("wigle", {})
+    cfg["wigle"]["bbox"] = {"lat1": lat_lo, "lat2": lat_hi, "lon1": lon_lo, "lon2": lon_hi}
+    save_config(cfg, CFG_PATH)
+
+    # Update running client to avoid restart
+    wigle.bbox = cfg["wigle"]["bbox"]
+
+    return jsonify({"ok": True, "bbox": cfg["wigle"]["bbox"]})
+
+
+@app.delete("/api/bbox")
+def clear_bbox():
+    w = cfg.get("wigle", {})
+    if "bbox" in w:
+        w.pop("bbox", None)
+        save_config(cfg, CFG_PATH)
+    # Update running client
+    wigle.bbox = None
+    return jsonify({"ok": True, "bbox": None})
+
+
+# ---- Debug helpers -------------------------------------------------------------
 @app.get("/api/debug/probes")
 def debug_probes():
     mac = request.args.get("mac", "").strip()
