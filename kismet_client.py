@@ -4,6 +4,14 @@ from requests.adapters import HTTPAdapter, Retry
 from typing import Any, Dict, List, Optional
 
 
+FIELDS_LIST = [
+    "kismet.device.base.macaddr",
+    "kismet.device.base.last_time",
+    "dot11.device.probed_ssid_map",
+    "dot11.device.probed_ssid_count",
+]
+
+
 class KismetClient:
     def __init__(
         self,
@@ -15,16 +23,11 @@ class KismetClient:
         retries: int = 2,
         backoff_factor: float = 0.5,
     ):
-        """
-        window_seconds: how far back to look for 'recent' devices (default 24h).
-        """
         self.base_url = base_url.rstrip("/")
         self.token = api_token
         self.window_seconds = int(window_seconds or 86400)
-
         self.timeout = (timeout_connect_s, timeout_read_s)
 
-        # Single shared session with retry/backoff on transient failures
         self.session = requests.Session()
         retry = Retry(
             total=retries,
@@ -40,26 +43,22 @@ class KismetClient:
     def _params(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         p = extra.copy() if extra else {}
         if self.token:
-            p["KISMET"] = self.token  # token is passed as a GET param
+            p["KISMET"] = self.token
         return p
 
-    def _post_json(self, path: str, json_body: Dict[str, Any], params: Optional[Dict[str, Any]] = None):
-        url = f"{self.base_url}{path}"
-        r = self.session.post(url, params=self._params(params), json=json_body, timeout=self.timeout)
-        r.raise_for_status()
-        return r.json()
-
-    def _get_json(self, path: str, params: Optional[Dict[str, Any]] = None):
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None):
         url = f"{self.base_url}{path}"
         r = self.session.get(url, params=self._params(params), timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
+    def _post(self, path: str, json_body: Dict[str, Any], params: Optional[Dict[str, Any]] = None):
+        url = f"{self.base_url}{path}"
+        r = self.session.post(url, params=self._params(params), json=json_body, timeout=self.timeout)
+        r.raise_for_status()
+        return r.json()
+
     def _extract_probed_ssids_from_map(self, m) -> List[str]:
-        """
-        Normalize dot11.device.probed_ssid_map to a list[str].
-        Handles both vector-of-objects (new) and dict-of-objects (old).
-        """
         out: List[str] = []
 
         def _pull(entry):
@@ -82,82 +81,122 @@ class KismetClient:
                     out.append(s)
         return out
 
+    def _as_list_from_view(self, js):
+        if isinstance(js, dict) and isinstance(js.get("devices"), list):
+            return js["devices"]
+        if isinstance(js, list):
+            return js
+        return []
+
     # ---------- public ----------
     def recent_devices(self, limit: int = 200) -> List[Dict[str, Any]]:
         """
-        Efficient recent view: devices active within the last `window_seconds`.
-        Uses the documented last-time endpoint on the 'all' view to avoid huge payloads:
-          /devices/views/all/last-time/{TIMESTAMP}/devices.json
-        Docs: https://www.kismetwireless.net/docs/api/device_views/
+        Try multiple compatible endpoints to fetch recent-ish devices
+        and *always* include the fields our parser expects.
         """
+        fields_csv = ",".join(FIELDS_LIST)
+
+        # 1) Preferred: GET last-time windowed view (lightweight)
         try:
-            # Negative timestamp = "seconds before now" per docs
-            path = f"/devices/views/all/last-time/{-self.window_seconds}/devices.json"
-            js = self._post_json(
-                path,
-                json_body={
-                    "fields": [
-                        "kismet.device.base.macaddr",
-                        "kismet.device.base.last_time",
-                        "dot11.device.probed_ssid_map",
-                        "dot11.device.probed_ssid_count",
-                    ]
+            js = self._get(
+                f"/devices/views/all/last-time/{-self.window_seconds}/devices.json",
+                params={"fields": fields_csv, "length": str(limit)},
+            )
+            devs = self._as_list_from_view(js)
+            if devs:
+                devs.sort(key=lambda d: d.get("kismet.device.base.last_time") or 0, reverse=True)
+                return devs[: max(1, int(limit))]
+        except requests.RequestException:
+            pass  # fall through
+
+        # 2) Fallback: GET full 'all' view with explicit order/limit
+        try:
+            js = self._get(
+                "/devices/views/all/devices.json",
+                params={
+                    "fields": fields_csv,
+                    "limit": str(limit),
+                    "orderby": "-kismet.device.base.last_time",
                 },
             )
-        except requests.Timeout:
-            # Graceful timeout -> empty list; caller can decide how to display
-            return []
+            devs = self._as_list_from_view(js)
+            if devs:
+                return devs[: max(1, int(limit))]
         except requests.RequestException:
-            # Other network errors -> empty list
-            return []
+            pass
 
-        # View endpoints return an object with "devices" (datatable-style)
-        if isinstance(js, dict) and isinstance(js.get("devices"), list):
-            devs = js["devices"]
-        elif isinstance(js, list):
-            devs = js
-        else:
-            devs = []
+        # 3) Last resort: POST last-time (some builds accept POST body for fields)
+        try:
+            js = self._post(
+                f"/devices/views/all/last-time/{-self.window_seconds}/devices.json",
+                json_body={"fields": FIELDS_LIST},
+            )
+            devs = self._as_list_from_view(js)
+            if devs:
+                devs.sort(key=lambda d: d.get("kismet.device.base.last_time") or 0, reverse=True)
+                return devs[: max(1, int(limit))]
+        except requests.RequestException:
+            pass
 
-        # Local sort and trim (cheaper than asking server to sort/start/length)
-        devs.sort(key=lambda d: d.get("kismet.device.base.last_time") or 0, reverse=True)
-        return devs[: max(1, int(limit))]
+        return []
 
     def device_probes(self, mac: str) -> List[str]:
         """
-        Primary lookup by MAC. The correct endpoint returns a LIST:
-          /devices/by-mac/{MAC}/devices.json
-        Docs: https://www.kismet-wifi.net/docs/api/devices/
+        Query by MAC using several endpoint variants for maximum compatibility.
+        Returns a list of probed SSID strings (may include '' wildcard).
         """
         if not mac:
             return []
         mac_u = mac.upper()
-        try:
-            js = self._post_json(
-                f"/devices/by-mac/{mac_u}/devices.json",
-                json_body={
-                    "fields": [
-                        "kismet.device.base.macaddr",
-                        "dot11.device.probed_ssid_map",
-                    ]
-                },
-            )
-        except requests.Timeout:
-            return []
-        except requests.RequestException:
-            return []
+        fields_csv = ",".join(["kismet.device.base.macaddr", "dot11.device.probed_ssid_map"])
 
-        # This returns a list; pick the matching MAC (case-insensitive)
-        records = js if isinstance(js, list) else []
-        for rec in records:
-            rec_mac = (rec.get("kismet.device.base.macaddr") or "").upper()
-            if rec_mac == mac_u:
-                m = rec.get("dot11.device.probed_ssid_map") or rec.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+        # A) Old single-object endpoint
+        try:
+            js = self._get(
+                f"/devices/by-mac/{mac_u}.json",
+                params={"fields": fields_csv},
+            )
+            if isinstance(js, dict):
+                m = js.get("dot11.device.probed_ssid_map") or js.get("dot11", {}).get("device", {}).get("probed_ssid_map")
                 ssids = self._extract_probed_ssids_from_map(m)
                 if ssids:
                     return ssids
+        except requests.RequestException:
+            pass
 
-        # Fallback: scan recent list within our window, which is still bounded
+        # B) Newer list endpoint via GET
+        try:
+            js = self._get(
+                f"/devices/by-mac/{mac_u}/devices.json",
+                params={"fields": fields_csv},
+            )
+            recs = js if isinstance(js, list) else []
+            for rec in recs:
+                if (rec.get("kismet.device.base.macaddr") or "").upper() == mac_u:
+                    m = rec.get("dot11.device.probed_ssid_map") or rec.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+                    ssids = self._extract_probed_ssids_from_map(m)
+                    if ssids:
+                        return ssids
+        except requests.RequestException:
+            pass
+
+        # C) Newer list endpoint via POST body (fields as JSON array)
+        try:
+            js = self._post(
+                f"/devices/by-mac/{mac_u}/devices.json",
+                json_body={"fields": FIELDS_LIST},
+            )
+            recs = js if isinstance(js, list) else []
+            for rec in recs:
+                if (rec.get("kismet.device.base.macaddr") or "").upper() == mac_u:
+                    m = rec.get("dot11.device.probed_ssid_map") or rec.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+                    ssids = self._extract_probed_ssids_from_map(m)
+                    if ssids:
+                        return ssids
+        except requests.RequestException:
+            pass
+
+        # D) Scan recent list as a final fallback
         return self.probes_from_recent(mac_u)
 
     def probes_from_recent(self, mac: str, scan_limit: int = 600) -> List[str]:

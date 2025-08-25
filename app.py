@@ -13,7 +13,6 @@ app = Flask(__name__, static_folder='static', template_folder='templates')
 
 cache = TTLCache("wigle_cache.json")
 
-# Allow optional kismet.window_seconds in config; default handled in client
 kis = KismetClient(
     cfg["kismet"]["base_url"],
     cfg["kismet"].get("api_token"),
@@ -90,8 +89,7 @@ def summary():
     try:
         devs = kis.recent_devices(limit=200)
     except Exception as e:
-        # Never 500 the frontend; return a JSON error the UI can still parse
-        return jsonify({"items": [], "error": f"kismet_error: {type(e).__name__}"}), 200
+        return jsonify({"items": [], "error": f"kismet_error: {type(e).__name__}: {e}"}), 200
 
     items = []
     for d in devs:
@@ -194,7 +192,6 @@ def clear_base():
     return jsonify({"ok": True, "base": None})
 
 
-# -------- Debug endpoint (safer) --------
 @app.get("/api/debug/probes")
 def debug_probes():
     mac = request.args.get("mac", "").strip()
@@ -209,8 +206,7 @@ def debug_probes():
     except requests.RequestException as e:
         return jsonify({"mac": mac, "error": f"kismet request failed: {e.__class__.__name__}"}), 200
     except Exception as e:
-        # Keep debug endpoint non-fatal
-        return jsonify({"mac": mac, "error": f"unexpected: {e.__class__.__name__}"}), 200
+        return jsonify({"mac": mac, "error": f"unexpected: {e.__class__.__name__}: {e}"}), 200
 
 
 if __name__ == "__main__":
