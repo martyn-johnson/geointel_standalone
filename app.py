@@ -108,6 +108,9 @@ class ProbeStore:
             self._prune_locked()
             out = []
             for mac, rec in self._by_mac.items():
+                # Ignore wildcard-only probers (only '' seen)
+                if not any((isinstance(s, str) and s) for s in rec["ssids"]):
+                    continue
                 ssids = sorted([s for s in rec["ssids"] if s and s not in IGNORED])  # clean for display
                 ssid_count = len(rec["ssids"])
                 out.append({"mac": mac, "ts": rec["ts"], "ssids": ssids, "ssid_count": ssid_count})
@@ -375,6 +378,9 @@ def _current_summary_items() -> List[Dict[str, Any]]:
         ssids_full = extract_probed_ssids(d)
         ssids_display = [s for s in ssids_full if s and s not in IGNORED]
         ssid_count = extract_probe_count(d)
+        # If we have a probed_ssid map but it is wildcard-only (''), ignore this device.
+        if ssids_full and not any(s for s in ssids_full if s):
+            continue
         if ssid_count <= 0 and not ssids_full:
             continue
         filtered.append({"mac": mac, "ts": ts, "ssids": ssids_display, "ssid_count": ssid_count})
