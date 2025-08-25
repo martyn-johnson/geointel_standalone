@@ -6,7 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qsl
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, Response
 from websocket import WebSocketApp  # websocket-client
 import requests
 
@@ -53,12 +53,16 @@ class ProbeStore:
       - last event timestamp (epoch seconds, from Kismet if present)
       - a set of probed SSIDs ('' empty means wildcard)
       - a running count (len of set; includes '' if present)
+
+    Extended with a version/Condition so listeners (SSE) can wait for updates.
     """
 
     def __init__(self, ttl_seconds: int = 24 * 3600, max_ssids_per_mac: int = 200):
         self.ttl = int(ttl_seconds)
         self.max_ssids = int(max_ssids_per_mac)
         self._lock = threading.RLock()
+        self._cv = threading.Condition(self._lock)
+        self._ver = 0  # monotonically increasing version for SSE listeners
         # mac -> {"ts": int, "ssids": set[str]}
         self._by_mac: Dict[str, Dict[str, Any]] = {}
 
@@ -70,6 +74,15 @@ class ProbeStore:
         stale = [m for m, rec in self._by_mac.items() if (rec.get("ts") or 0) < cutoff]
         for m in stale:
             self._by_mac.pop(m, None)
+
+    def version(self) -> int:
+        with self._lock:
+            return self._ver
+
+    def wait_for_change(self, since_ver: int, timeout: float = 25.0) -> bool:
+        """Block until version changes (or timeout)."""
+        with self._cv:
+            return self._cv.wait_for(lambda: self._ver != since_ver, timeout=timeout)
 
     def record(self, mac: str, ssid: str | None, ts: Optional[int]) -> None:
         mac_u = (mac or "").upper()
@@ -86,6 +99,9 @@ class ProbeStore:
             if len(rec["ssids"]) < self.max_ssids:
                 rec["ssids"].add(s)
             self._prune_locked()
+            # bump version and notify listeners
+            self._ver += 1
+            self._cv.notify_all()
 
     def items(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -236,7 +252,6 @@ def _start_eventbus_thread():
 
                 def on_open(_ws):
                     # Subscribe without field filters (broadest compatibility).
-                    # Kismet accepts plain {"SUBSCRIBE": "DOT11_PROBED_SSID"}.
                     sub = {"SUBSCRIBE": "DOT11_PROBED_SSID"}
                     try:
                         _ws.send(json.dumps(sub))
@@ -337,6 +352,37 @@ def extract_probe_count(dev: dict) -> int:
     return 0
 
 
+def _current_summary_items() -> List[Dict[str, Any]]:
+    """
+    Shared logic for summary endpoints:
+    - Prefer live PROBES cache (eventbus)
+    - If empty, fall back to a small REST window from Kismet
+    """
+    items = PROBES.items()
+    if items:
+        return items
+
+    # Fallback: recent window via Kismet REST
+    try:
+        devs = kis.recent_devices(limit=200)
+    except Exception:
+        return []
+
+    filtered = []
+    for d in devs:
+        mac = d.get("kismet.device.base.macaddr")
+        ts = d.get("kismet.device.base.last_time")
+        ssids_full = extract_probed_ssids(d)
+        ssids_display = [s for s in ssids_full if s and s not in IGNORED]
+        ssid_count = extract_probe_count(d)
+        if ssid_count <= 0 and not ssids_full:
+            continue
+        filtered.append({"mac": mac, "ts": ts, "ssids": ssids_display, "ssid_count": ssid_count})
+
+    filtered.sort(key=lambda x: x["ts"] or 0, reverse=True)
+    return filtered
+
+
 # --------------------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------------------
@@ -351,30 +397,43 @@ def summary():
     Prefer the live eventbus cache so you see probers immediately.
     If empty (eg. app just started), fall back to a small REST window.
     """
-    items = PROBES.items()
-    if not items:
-        try:
-            # Light fallback: recent window, client-side filter to probers
-            devs = kis.recent_devices(limit=200)
-        except Exception as e:
-            return jsonify({"items": [], "error": f"kismet_error: {type(e).__name__}: {e}"}), 200
+    try:
+        return jsonify({"items": _current_summary_items()})
+    except Exception as e:
+        return jsonify({"items": [], "error": f"unexpected: {type(e).__name__}: {e}"}), 200
 
-        filtered = []
-        for d in devs:
-            mac = d.get("kismet.device.base.macaddr")
-            ts = d.get("kismet.device.base.last_time")
-            ssids_full = extract_probed_ssids(d)
-            ssids_display = [s for s in ssids_full if s and s not in IGNORED]
-            ssid_count = extract_probe_count(d)
-            if ssid_count <= 0 and not ssids_full:
-                continue
-            filtered.append({"mac": mac, "ts": ts, "ssids": ssids_display, "ssid_count": ssid_count})
 
-        filtered.sort(key=lambda x: x["ts"] or 0, reverse=True)
-        return jsonify({"items": filtered})
+@app.get("/api/stream/summary")
+def stream_summary():
+    """
+    Server-Sent Events stream of the summary list.
+    Sends an initial snapshot, then pushes every change.
+    Includes heartbeat comments to keep intermediaries from closing the connection.
+    """
+    def event_stream():
+        # Initial snapshot (could be empty if nothing seen yet)
+        last_ver = PROBES.version()
+        initial = json.dumps({"items": _current_summary_items()})
+        yield f"data: {initial}\n\n"
 
-    # We already have a live list of probers
-    return jsonify({"items": items})
+        # Stream updates
+        while True:
+            changed = PROBES.wait_for_change(last_ver, timeout=30.0)
+            if changed:
+                last_ver = PROBES.version()
+                payload = json.dumps({"items": _current_summary_items()})
+                yield f"data: {payload}\n\n"
+            else:
+                # Heartbeat comment
+                yield f": keep-alive {int(time.time())}\n\n"
+
+    headers = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # helpful if behind nginx
+    }
+    return Response(event_stream(), headers=headers)
 
 
 @app.get("/api/candidates")

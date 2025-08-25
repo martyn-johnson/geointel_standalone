@@ -14,6 +14,7 @@
     .item:hover { background:#f7f7f7; }
     .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; margin-left: 6px; }
     .controls { margin-left:auto; display:flex; gap:.5rem; align-items:center; }
+    .status { font-size:12px; opacity:.7; }
   </style>
 </head>
 <body>
@@ -24,6 +25,7 @@
     <button id="clear-base">Clear Base</button>
     <label><input id="likely-only" type="checkbox" checked> Likely only</label>
     <button id="refresh">Refresh</button>
+    <span id="live-status" class="status">live: connecting…</span>
   </div>
 </header>
 <main>
@@ -34,6 +36,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 let map, markers, baseLatLon = null, settingBase = false, baseMarker = null;
+let es = null;
 
 function initMap() {
   map = L.map('map').setView([51.5, -0.12], 6);
@@ -152,6 +155,29 @@ async function refresh() {
   renderList(items);
 }
 
+function startLiveSummary() {
+  const statusEl = document.getElementById('live-status');
+  if (!!window.EventSource) {
+    es = new EventSource('/api/stream/summary');
+    es.onopen = () => { if (statusEl) statusEl.textContent = 'live: connected'; };
+    es.onmessage = (ev) => {
+      try {
+        const js = JSON.parse(ev.data);
+        renderList(js.items || []);
+      } catch (_) {}
+    };
+    es.onerror = (_e) => {
+      // EventSource auto-reconnects. Update status text.
+      if (statusEl) statusEl.textContent = 'live: reconnecting…';
+    };
+  } else {
+    if (statusEl) statusEl.textContent = 'live: not supported (falling back)';
+    // Fallback polling
+    refresh();
+    setInterval(refresh, 5000);
+  }
+}
+
 document.getElementById('set-base').onclick = () => { settingBase = true; };
 document.getElementById('clear-base').onclick = async () => {
   try {
@@ -164,7 +190,8 @@ document.getElementById('refresh').onclick = refresh;
 
 initMap();
 loadBase();
-refresh();
+// SSE live summary (initial snapshot comes from the stream)
+startLiveSummary();
 </script>
 </body>
 </html>
