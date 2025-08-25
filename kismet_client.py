@@ -8,7 +8,7 @@ class KismetClient:
     def _params(self, extra=None):
         p = extra.copy() if extra else {}
         if self.token:
-            p["kismet_access_token"] = self.token
+            p["KISMET"] = self.token  # <- required name
         return p
 
     def recent_devices(self, limit=200):

@@ -108,8 +108,8 @@ python app.py
 ### 1) Clone the repo
 
 ```bash
-git clone https://github.com/martyn-johnson/geointel.git
-cd geointel
+git clone https://github.com/martyn-johnson/geointel_standalone.git
+cd geointel_standalone
 ```
 
 ### 2) Python version
@@ -233,7 +233,7 @@ chmod +x app.py
 
 ## Run as a service (optional, Raspberry Pi / systemd)
 
-Create a unit file: `/etc/systemd/system/geointel.service`
+Create a unit file: `/etc/systemd/system/geointel_standalone.service`
 
 ```ini
 [Unit]
@@ -242,9 +242,9 @@ After=network-online.target
 
 [Service]
 User=pi
-WorkingDirectory=/home/pi/geointel
-Environment=GEOINTEL_CONFIG=/home/pi/geointel/config.local.yml
-ExecStart=/home/pi/geointel/.venv/bin/python /home/pi/geointel/app.py
+WorkingDirectory=/home/pi/geointel_standalone
+Environment=GEOINTEL_CONFIG=/home/pi/geointel_standalone/config.local.yml
+ExecStart=/home/pi/geointel_standalone/.venv/bin/python /home/pi/geointel_standalone/app.py
 Restart=on-failure
 
 [Install]
@@ -255,8 +255,8 @@ Then:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now geointel
-sudo systemctl status geointel
+sudo systemctl enable --now geointel_standalone
+sudo systemctl status geointel_standalone
 ```
 
 ---
