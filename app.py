@@ -28,34 +28,17 @@ wigle = WiGLEClient(
 
 IGNORED = set()
 
-
-# -------- Helpers (summary parsing) --------
+# -------- Helpers for parsing --------
 def _extract_ssids_from_map(m):
-    # delegate to client's robust logic by keeping this in sync
-    # (copied to avoid import cycle)
     out = []
 
     def _pull(entry):
-        if isinstance(entry, str):
-            return entry
         if not isinstance(entry, dict):
             return None
-        if entry.get("dot11.probedssid.nullssid") is True:
-            return ""
-        if isinstance(entry.get("ssidlen"), int) and entry.get("ssidlen") == 0:
-            return ""
-        for k in ("dot11.probedssid.ssid", "ssid", "dot11.ssid", "probedssid.ssid"):
-            v = entry.get(k)
-            if isinstance(v, str):
-                return v
-        nested = entry.get("dot11") or entry.get("probedssid") or {}
-        if isinstance(nested, dict):
-            v = nested.get("probedssid") or nested.get("ssid")
-            if isinstance(v, dict) and isinstance(v.get("ssid"), str):
-                return v.get("ssid")
-            if isinstance(v, str):
-                return v
-        return None
+        return (
+            entry.get("dot11.probedssid.ssid")
+            or entry.get("dot11", {}).get("probedssid", {}).get("ssid")
+        )
 
     if isinstance(m, list):
         for e in m:
@@ -80,61 +63,59 @@ def extract_probed_ssids(dev: dict) -> list:
 
 
 def extract_probe_count(dev: dict) -> int:
+    # Handle both counters and fall back to counting the map
     c = dev.get("dot11.device.probed_ssid_count")
     if isinstance(c, int):
         return c
     c2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_count")
     if isinstance(c2, int):
         return c2
+    c3 = dev.get("dot11", {}).get("device", {}).get("num_probed_ssids")
+    if isinstance(c3, int):
+        return c3
     m = dev.get("dot11.device.probed_ssid_map") or dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
     if isinstance(m, list):
-        # count entries, including wildcard '' as activity
-        return sum(1 for e in m if isinstance(e, (dict, str)))
+        return sum(1 for e in m if isinstance(e, dict))
     if isinstance(m, dict):
         return len(m)
     return 0
 
-
 # -------- Routes --------
-@app.route("/")
+@app.route('/')
 def index():
-    return render_template("index.html")
+    return render_template('index.html')
 
-
-@app.get("/api/summary")
+@app.get('/api/summary')
 def summary():
     try:
-        devs = kis.recent_devices(limit=200)
+        # Ask Kismet to return ONLY devices that probed (server-side regex filter).
+        devs = kis.recent_devices(limit=200, probes_only=True)
     except Exception as e:
-        return jsonify({"items": [], "error": f"kismet_error: {type(e).__name__}: {e}"}), 200
+        return jsonify({"items": [], "error": f"kismet_error: {type(e).__name__}"}), 200
 
     items = []
     for d in devs:
         mac = d.get("kismet.device.base.macaddr")
         ts = d.get("kismet.device.base.last_time")
-
         ssids_full = extract_probed_ssids(d)
         ssids_display = [s for s in ssids_full if s and s not in IGNORED]
         ssid_count = extract_probe_count(d)
 
-        # Only include devices that actually had probe activity
+        # We already requested "probes_only", but keep a belt-and-braces check:
         if ssid_count <= 0 and not ssids_full:
             continue
 
-        items.append(
-            {
-                "mac": mac,
-                "ts": ts,
-                "ssids": ssids_display,
-                "ssid_count": ssid_count,
-            }
-        )
+        items.append({
+            "mac": mac,
+            "ts": ts,
+            "ssids": ssids_display,
+            "ssid_count": ssid_count,
+        })
 
     items.sort(key=lambda x: x["ts"] or 0, reverse=True)
     return jsonify({"items": items})
 
-
-@app.get("/api/candidates")
+@app.get('/api/candidates')
 def candidates():
     mac = request.args.get("mac")
     ssid_only = request.args.get("ssid")
@@ -168,9 +149,9 @@ def candidates():
             cache.set(key, hits, ttl_s)
         rarity_counts[s] = len(hits)
         for h in hits:
-            raw_candidates.append(
-                {"lat": h["lat"], "lon": h["lon"], "ssid": s, "lastupdt": h.get("lastupdt")}
-            )
+            raw_candidates.append({
+                "lat": h["lat"], "lon": h["lon"], "ssid": s, "lastupdt": h.get("lastupdt")
+            })
 
     scored = score_candidates(raw_candidates, dev_ssids, rarity_counts, base_latlon, cfg)
     if likely_only:
@@ -179,16 +160,14 @@ def candidates():
         scored = scored[:500]
     return jsonify({"candidates": scored})
 
-
-@app.get("/api/base")
+@app.get('/api/base')
 def get_base():
     base = cfg.get("base")
     if isinstance(base, dict) and "lat" in base and "lon" in base:
         return jsonify({"base": {"lat": float(base["lat"]), "lon": float(base["lon"])}})
     return jsonify({"base": None})
 
-
-@app.post("/api/base")
+@app.post('/api/base')
 def set_base():
     data = request.get_json(force=True, silent=True) or {}
     try:
@@ -200,16 +179,14 @@ def set_base():
     save_config(cfg, CFG_PATH)
     return jsonify({"ok": True, "base": cfg["base"]})
 
-
-@app.delete("/api/base")
+@app.delete('/api/base')
 def clear_base():
     if "base" in cfg:
         cfg.pop("base", None)
         save_config(cfg, CFG_PATH)
     return jsonify({"ok": True, "base": None})
 
-
-# -------- Debug endpoints --------
+# Debug endpoint
 @app.get("/api/debug/probes")
 def debug_probes():
     mac = request.args.get("mac", "").strip()
@@ -223,21 +200,7 @@ def debug_probes():
     except requests.RequestException as e:
         return jsonify({"mac": mac, "error": f"kismet request failed: {e.__class__.__name__}"}), 200
     except Exception as e:
-        return jsonify({"mac": mac, "error": f"unexpected: {e.__class__.__name__}: {e}"}), 200
-
-
-@app.get("/api/debug/sample")
-def debug_sample():
-    """
-    Returns the first device from the view including the probed_ssid_map,
-    so we can verify the exact shape your Kismet build returns.
-    """
-    try:
-        devs = kis.recent_devices(limit=1)
-        return jsonify({"count": len(devs), "sample": devs[0] if devs else None})
-    except Exception as e:
-        return jsonify({"error": f"{type(e).__name__}: {e}"}), 200
-
+        return jsonify({"mac": mac, "error": f"unexpected: {e.__class__.__name__}"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5699, debug=True)
