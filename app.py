@@ -27,16 +27,36 @@ def index():
 
 @app.get('/api/summary')
 def summary():
+    def extract_probed_ssids(dev):
+        # Accept both shapes
+        m = dev.get("dot11.device.probed_ssid_map")
+        if isinstance(m, dict):
+            return list(m.keys())
+        m2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_map")
+        if isinstance(m2, dict):
+            return list(m2.keys())
+        return []
+
+    def extract_probe_count(dev):
+        c = dev.get("dot11.device.probed_ssid_count")
+        if isinstance(c, int):
+            return c
+        c2 = dev.get("dot11", {}).get("device", {}).get("probed_ssid_count")
+        if isinstance(c2, int):
+            return c2
+        return 0
+
     devs = kis.recent_devices(limit=200)
     items = []
     for d in devs:
         mac = d.get("kismet.device.base.macaddr")
         ts = d.get("kismet.device.base.last_time")
-        m = d.get("dot11.device.probed_ssid_map") or {}
-        ssids = [s for s in m.keys() if s and s not in IGNORED]
-        items.append({"mac": mac, "ts": ts, "ssids": ssids})
+        ssids = [s for s in extract_probed_ssids(d) if s and s not in IGNORED]
+        ssid_count = extract_probe_count(d)
+        items.append({"mac": mac, "ts": ts, "ssids": ssids, "ssid_count": ssid_count})
     items.sort(key=lambda x: x["ts"] or 0, reverse=True)
     return jsonify({"items": items})
+
 
 @app.get('/api/candidates')
 def candidates():

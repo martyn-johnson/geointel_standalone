@@ -32,7 +32,12 @@ class KismetClient:
 
     def recent_devices(self, limit=200):
         url = self.base_url + "/devices/views/all/devices.json"
-        fields = "kismet.device.base.macaddr,kismet.device.base.last_time,dot11.device.probed_ssid_map"
+        fields = (
+            "kismet.device.base.macaddr,"
+            "kismet.device.base.last_time,"
+            "dot11.device.probed_ssid_map,"
+            "dot11.device.probed_ssid_count"
+        )
         params = self._params({
             "fields": fields,
             "limit": str(limit),

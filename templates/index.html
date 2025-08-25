@@ -108,13 +108,22 @@ function renderList(items) {
     const div = document.createElement('div');
     div.className = 'item';
     const when = it.ts ? new Date(it.ts * 1000).toLocaleString() : '';
+
+    const ssidsTxt = (it.ssids && it.ssids.length)
+      ? it.ssids.slice(0,6).join(', ')
+      : (it.ssid_count && it.ssid_count > 0
+          ? '<i>wildcard-only probes (' + it.ssid_count + ')</i>'
+          : '<i>no probes</i>');
+
     div.innerHTML = '<strong>' + it.mac + '</strong>'
       + (when ? '<span class="badge">' + when + '</span>' : '')
-      + '<div>' + ((it.ssids||[]).slice(0,6).join(', ') || '<i>no probes</i>') + '</div>';
+      + '<div>' + ssidsTxt + '</div>';
+
     div.onclick = () => loadCandidates(it.mac);
     list.appendChild(div);
   }
 }
+
 
 async function loadCandidates(mac) {
   markers.clearLayers();
