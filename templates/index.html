@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>GeoIntel Standalone</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+    header { display:flex; align-items:center; gap:.5rem; padding:.5rem 1rem; border-bottom:1px solid #ddd; }
+    main { display:grid; grid-template-columns: 360px 1fr; height: calc(100vh - 56px); }
+    #list { overflow:auto; border-right:1px solid #ddd; }
+    #map { height: 100%; }
+    .item { padding:8px 12px; border-bottom:1px solid #eee; cursor:pointer; }
+    .item:hover { background:#f7f7f7; }
+    .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; margin-left: 6px; }
+    .controls { margin-left:auto; display:flex; gap:.5rem; align-items:center; }
+  </style>
+</head>
+<body>
+<header>
+  <h3 style="margin:0">GeoIntel Standalone</h3>
+  <div class="controls">
+    <button id="set-base">Set Base</button>
+    <button id="clear-base">Clear Base</button>
+    <label><input id="likely-only" type="checkbox" checked> Likely only</label>
+    <button id="refresh">Refresh</button>
+  </div>
+</header>
+<main>
+  <aside id="list"></aside>
+  <section id="map"></section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+let map, markers, baseLatLon = null, settingBase = false;
+
+function initMap() {
+  map = L.map('map').setView([51.5, -0.12], 6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+  markers = L.layerGroup().addTo(map);
+  map.on('click', e => {
+    if (settingBase) {
+      baseLatLon = [e.latlng.lat, e.latlng.lng];
+      settingBase = false;
+      alert('Base set to ' + baseLatLon.join(','));
+    }
+  });
+}
+
+async function fetchSummary() {
+  const r = await fetch('/api/summary', {cache:'no-store'});
+  const js = await r.json();
+  return js.items || [];
+}
+
+function renderList(items) {
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  for (const it of items) {
+    const div = document.createElement('div');
+    div.className = 'item';
+    const when = it.ts ? new Date(it.ts * 1000).toLocaleString() : '';
+    div.innerHTML = '<strong>' + it.mac + '</strong>'
+      + (when ? '<span class="badge">' + when + '</span>' : '')
+      + '<div>' + ((it.ssids||[]).slice(0,6).join(', ') || '<i>no probes</i>') + '</div>';
+    div.onclick = () => loadCandidates(it.mac);
+    list.appendChild(div);
+  }
+}
+
+async function loadCandidates(mac) {
+  markers.clearLayers();
+  const params = new URLSearchParams({mac});
+  if (baseLatLon) params.set('base', baseLatLon.join(','));
+  const likelyOnly = document.getElementById('likely-only').checked ? '1' : '0';
+  params.set('likely_only', likelyOnly);
+  const r = await fetch('/api/candidates?' + params.toString());
+  const js = await r.json();
+  const items = js.candidates || [];
+  let bounds = [];
+  for (const c of items) {
+    const ll = [c.lat, c.lon];
+    const m = L.circleMarker(ll, { radius: Math.max(4, 12 * (c.score || 0.2)) });
+    m.bindTooltip(c.ssid + '<br/>score: ' + (c.score||0).toFixed(3));
+    markers.addLayer(m);
+    bounds.push(ll);
+  }
+  if (bounds.length) map.fitBounds(bounds, {maxZoom: 13});
+}
+
+async function refresh() {
+  const items = await fetchSummary();
+  renderList(items);
+}
+
+document.getElementById('set-base').onclick = () => { settingBase = true; };
+document.getElementById('clear-base').onclick = () => { baseLatLon = null; };
+document.getElementById('refresh').onclick = refresh;
+
+initMap();
+refresh();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+kismet:
+  base_url: "http://127.0.0.1:2501"
+  api_token: ""      # optional
+
+wigle:
+  api_name: "YOUR_WIGLE_USERNAME"
+  api_token: "YOUR_WIGLE_API_TOKEN"
+  bbox:              # optional bounding box (UK example); remove to search globally
+    lat1: 49.9
+    lat2: 58.7
+    lon1: -8.6
+    lon2: 1.8
+  page_cap: 400
+  ttl_hours: 24
+
+scoring:
+  alpha_coprobe: 0.7
+  sigma_km: 10.0
+  coprobe_radius_m: 300
+  rarity_weight: 1.0
+  proximity_weight: 1.0
