@@ -74,8 +74,8 @@ geointel/
 
 ```bash
 # 1) Clone
-git clone https://github.com/martyn-johnson/geointel.git
-cd geointel
+git clone https://github.com/martyn-johnson/geointel_standalone.git
+cd geointel_standalone
 
 # 2) Python env
 python3 -m venv .venv
