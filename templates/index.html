@@ -15,7 +15,7 @@
     .badge { font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #eee; margin-left: 6px; }
     .controls { margin-left:auto; display:flex; gap:.5rem; align-items:center; flex-wrap: wrap; }
     .status { font-size:12px; opacity:.7; }
-    .mode { font-size:12px; opacity:.8; padding:2px 6px; border:1px dashed #aaa; border-radius: 6px; }
+    .mode { font-size:12px; opacity:.8; padding:2px 6px; border:1px dashed #aaa; border-radius:6px; }
   </style>
 </head>
 <body>
@@ -24,6 +24,7 @@
   <div class="controls">
     <button id="set-base">Set Base</button>
     <button id="clear-base">Clear Base</button>
+    <!-- NEW -->
     <button id="set-bbox">Set BBox</button>
     <button id="clear-bbox">Clear BBox</button>
     <label><input id="likely-only" type="checkbox" checked> Likely only</label>
@@ -42,7 +43,7 @@
 let map, markers, baseLatLon = null, settingBase = false, baseMarker = null;
 let es = null;
 
-// BBox state
+// --- BBox state ---
 let settingBBox = false;
 let bboxFirst = null;   // first corner LatLng
 let bboxRect = null;    // Leaflet rectangle
@@ -63,7 +64,7 @@ function initMap() {
   markers = L.layerGroup().addTo(map);
 
   map.on('click', async e => {
-    // Base placement mode takes precedence
+    // Base placement mode
     if (settingBase) {
       const lat = e.latlng.lat, lon = e.latlng.lng;
       try {
@@ -113,7 +114,7 @@ function initMap() {
           });
           const js = await r.json();
           if (js && js.bbox) {
-            drawBBoxRect(js.bbox);
+            drawBBoxRect(js.bbox, /*fit=*/true);
             alert('BBox set.');
           } else if (js && js.error) {
             alert('Failed to set BBox: ' + js.error);
@@ -139,7 +140,7 @@ function drawBaseMarker() {
   }
 }
 
-function drawBBoxRect(bbox) {
+function drawBBoxRect(bbox, fit=false) {
   if (!map) return;
   if (bboxRect) {
     map.removeLayer(bboxRect);
@@ -152,6 +153,7 @@ function drawBBoxRect(bbox) {
     const bounds = L.latLngBounds(southWest, northEast);
     bboxRect = L.rectangle(bounds, { weight: 2, fillOpacity: 0.05 });
     bboxRect.addTo(map);
+    if (fit) map.fitBounds(bounds);
   }
 }
 
@@ -175,7 +177,7 @@ async function loadBBox() {
     const r = await fetch('/api/bbox', { cache: 'no-store' });
     const js = await r.json();
     if (js && js.bbox) {
-      drawBBoxRect(js.bbox);
+      drawBBoxRect(js.bbox, /*fit=*/true);  // FIT on load so you see it immediately
     } else {
       drawBBoxRect(null);
     }
@@ -230,7 +232,7 @@ async function loadCandidates(mac) {
     markers.addLayer(m);
     bounds.push(ll);
   }
-  // also include base marker in fit if present
+  // also include base marker + bbox in fit if present
   if (baseLatLon) bounds.push(baseLatLon);
   if (bboxRect) {
     const b = bboxRect.getBounds();
@@ -256,18 +258,16 @@ function startLiveSummary() {
       } catch (_) {}
     };
     es.onerror = (_e) => {
-      // EventSource auto-reconnects. Update status text.
       if (statusEl) statusEl.textContent = 'live: reconnecting…';
     };
   } else {
     if (statusEl) statusEl.textContent = 'live: not supported (falling back)';
-    // Fallback polling
     refresh();
     setInterval(refresh, 5000);
   }
 }
 
-// Controls
+// --- Controls ---
 document.getElementById('set-base').onclick = () => {
   settingBase = true;
   settingBBox = false; bboxFirst = null;
@@ -297,15 +297,13 @@ document.getElementById('clear-bbox').onclick = async () => {
   setModeText(null);
 };
 
-// Manual refresh still useful
 document.getElementById('refresh').onclick = refresh;
 
-// Boot
+// --- Boot ---
 initMap();
 loadBase();
-loadBBox();
-// SSE live summary (initial snapshot comes from the stream)
-startLiveSummary();
+loadBBox();   // << ensure static bbox from config is drawn on load
+startLiveSummary(); // SSE live summary
 </script>
 </body>
 </html>
